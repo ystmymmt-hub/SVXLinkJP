@@ -1,0 +1,90 @@
+#!/bin/bash
+
+while true
+do
+
+CHOICE=$(whiptail \
+--title "SVXLink JP Edition Ver2.0" \
+--menu "メインメニュー" \
+20 70 10 \
+"1" "SVXLink 起動" \
+"2" "SVXLink 停止" \
+"3" "SVXLink 再起動" \
+"4" "状態確認" \
+"5" "コールサイン設定" \
+"6" "EchoLink設定" \
+"7" "ネットワーク設定" \
+"8" "GPIO設定" \
+"9" "USB Audio設定" \
+"B" "バックアップ" \
+"Q" "終了" \
+3>&1 1>&2 2>&3)
+
+RET=$?
+
+if [ $RET -ne 0 ]; then
+    clear
+    exit
+fi
+
+case $CHOICE in
+
+1)
+sudo systemctl start svxlink
+whiptail --msgbox "SVXLinkを起動しました。" 10 50
+;;
+
+2)
+sudo systemctl stop svxlink
+whiptail --msgbox "SVXLinkを停止しました。" 10 50
+;;
+
+3)
+sudo systemctl restart svxlink
+whiptail --msgbox "SVXLinkを再起動しました。" 10 50
+;;
+
+4)
+STATUS=$(systemctl is-active svxlink)
+
+whiptail \
+--msgbox \
+"SVXLink状態
+
+$STATUS" \
+12 50
+;;
+
+5)
+whiptail --msgbox "次回実装予定です。" 10 40
+;;
+
+6)
+whiptail --msgbox "次回実装予定です。" 10 40
+;;
+
+7)
+whiptail --msgbox "次回実装予定です。" 10 40
+;;
+
+8)
+whiptail --msgbox "次回実装予定です。" 10 40
+;;
+
+9)
+whiptail --msgbox "次回実装予定です。" 10 40
+;;
+
+B)
+bash ~/SVXLinkJP/scripts/config_manager.sh
+whiptail --msgbox "バックアップしました。" 10 40
+;;
+
+Q)
+clear
+exit
+;;
+
+esac
+
+done

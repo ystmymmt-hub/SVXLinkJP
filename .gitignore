@@ -1,0 +1,14 @@
+# System backup archives - may contain private settings
+backup/system/
+*.tar.gz
+*.tgz
+
+# Local configuration backups
+backup/*.ini
+
+# Temporary files
+*.tmp
+*.log
+*~
+__pycache__/
+*.pyc
