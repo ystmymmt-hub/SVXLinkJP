@@ -1,14 +1,20 @@
-# System backup archives - may contain private settings
-backup/system/
+# バックアップ・復元データ
+backup/
 *.tar.gz
 *.tgz
 
-# Local configuration backups
-backup/*.ini
+# NetworkManager設定（Wi-Fiパスワードを含む可能性あり）
+*.nmconnection
 
-# Temporary files
+# 実機固有のローカル設定
+config/config.ini
+
+# 一時ファイル・旧版
 *.tmp
 *.log
 *~
+*.swp
+*.bak
+*.bak.*
 __pycache__/
 *.pyc

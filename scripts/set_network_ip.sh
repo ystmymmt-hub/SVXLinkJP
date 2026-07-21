@@ -1,0 +1,400 @@
+#!/bin/bash
+
+DEVICE="$1"
+MODE="$2"
+
+PROJECT_DIR="$HOME/SVXLinkJP"
+BACKUP_DIR="$PROJECT_DIR/backup/network"
+
+mkdir -p "$BACKUP_DIR"
+
+error_box()
+{
+    whiptail \
+        --title "Network Error" \
+        --msgbox "$1" \
+        13 72
+}
+
+valid_ipv4()
+{
+    local ip="$1"
+    local IFS=.
+    local parts
+    local part
+
+    read -r -a parts <<< "$ip"
+
+    [ "${#parts[@]}" -eq 4 ] || return 1
+
+    for part in "${parts[@]}"; do
+        [[ "$part" =~ ^[0-9]+$ ]] || return 1
+        [ "$part" -ge 0 ] || return 1
+        [ "$part" -le 255 ] || return 1
+    done
+
+    return 0
+}
+
+if [ "$DEVICE" != "eth0" ] &&
+   [ "$DEVICE" != "wlan0" ]; then
+    error_box "対象インターフェースが正しくありません。"
+    exit 1
+fi
+
+if [ "$MODE" != "static" ] &&
+   [ "$MODE" != "dhcp" ]; then
+    error_box "設定モードが正しくありません。"
+    exit 1
+fi
+
+if ! systemctl is-active --quiet NetworkManager; then
+    error_box "NetworkManagerが動作していません。"
+    exit 1
+fi
+
+CONNECTION=$(nmcli -t -f NAME,DEVICE connection show --active |
+    awk -F: -v dev="$DEVICE" '$NF == dev {
+        sub(":" dev "$", "")
+        print
+        exit
+    }')
+
+if [ -z "$CONNECTION" ]; then
+    CONNECTION=$(nmcli -t -f NAME,DEVICE connection show |
+        awk -F: -v dev="$DEVICE" '$NF == dev {
+            sub(":" dev "$", "")
+            print
+            exit
+        }')
+fi
+
+if [ -z "$CONNECTION" ]; then
+    if [ "$DEVICE" = "eth0" ]; then
+        CONNECTION="netplan-eth0"
+    else
+        CONNECTION=$(nmcli -t -f NAME,TYPE connection show |
+            awk -F: '$2 == "802-11-wireless" {
+                print $1
+                exit
+            }')
+    fi
+fi
+
+if [ -z "$CONNECTION" ] ||
+   ! nmcli connection show "$CONNECTION" >/dev/null 2>&1; then
+    error_box \
+"接続プロファイルを確認できませんでした。
+
+対象:
+$DEVICE
+
+次のコマンドで確認してください。
+nmcli connection show"
+    exit 1
+fi
+
+backup_current_network()
+{
+    local stamp
+    local save_dir
+
+    stamp=$(date '+%Y%m%d_%H%M%S')
+    save_dir="$BACKUP_DIR/network_${stamp}"
+
+    mkdir -p "$save_dir"
+
+    sudo cp -a /etc/netplan \
+        "$save_dir/" 2>/dev/null || true
+
+    sudo cp -a /etc/NetworkManager/system-connections \
+        "$save_dir/" 2>/dev/null || true
+
+    sudo cp -a /run/NetworkManager/system-connections \
+        "$save_dir/run-system-connections" 2>/dev/null || true
+
+    nmcli connection show > \
+        "$save_dir/connections.txt" 2>&1
+
+    nmcli connection show "$CONNECTION" > \
+        "$save_dir/current_connection.txt" 2>&1
+
+    ip -4 address > \
+        "$save_dir/ip_address.txt" 2>&1
+
+    ip route > \
+        "$save_dir/ip_route.txt" 2>&1
+
+    sudo chown -R "$(id -u):$(id -g)" \
+        "$save_dir" 2>/dev/null || true
+
+    echo "$save_dir"
+}
+
+CURRENT_ADDRESS=$(nmcli -g ipv4.addresses \
+    connection show "$CONNECTION" 2>/dev/null |
+    head -1)
+
+CURRENT_IP=${CURRENT_ADDRESS%/*}
+CURRENT_PREFIX=${CURRENT_ADDRESS#*/}
+
+if [ "$CURRENT_ADDRESS" = "$CURRENT_IP" ]; then
+    CURRENT_PREFIX=""
+fi
+
+CURRENT_METHOD=$(nmcli -g ipv4.method \
+    connection show "$CONNECTION" 2>/dev/null |
+    head -1)
+
+CURRENT_GATEWAY=$(nmcli -g ipv4.gateway \
+    connection show "$CONNECTION" 2>/dev/null |
+    head -1)
+
+CURRENT_DNS=$(nmcli -g ipv4.dns \
+    connection show "$CONNECTION" 2>/dev/null |
+    paste -sd ' ' -)
+
+LIVE_ADDRESS=$(ip -4 -o address show dev "$DEVICE" 2>/dev/null |
+    awk 'NR == 1 {print $4}')
+
+LIVE_IP=${LIVE_ADDRESS%/*}
+LIVE_PREFIX=${LIVE_ADDRESS#*/}
+
+[ -z "$CURRENT_IP" ] &&
+    CURRENT_IP="$LIVE_IP"
+
+[ -z "$CURRENT_PREFIX" ] &&
+    CURRENT_PREFIX="$LIVE_PREFIX"
+
+[ -z "$CURRENT_PREFIX" ] &&
+    CURRENT_PREFIX="24"
+
+if [ -z "$CURRENT_GATEWAY" ]; then
+    CURRENT_GATEWAY=$(ip route show default dev "$DEVICE" 2>/dev/null |
+        awk 'NR == 1 {print $3}')
+fi
+
+[ -z "$CURRENT_DNS" ] &&
+    CURRENT_DNS="8.8.8.8 1.1.1.1"
+
+if [ "$MODE" = "dhcp" ]; then
+    whiptail \
+        --title "DHCP設定" \
+        --yesno \
+"次の接続をDHCPに変更します。
+
+インターフェース:
+$DEVICE
+
+接続名:
+$CONNECTION
+
+現在の方式:
+$CURRENT_METHOD
+
+現在SSH接続中の場合は通信が切れることがあります。
+
+実行しますか？" \
+        20 72
+
+    [ $? -ne 0 ] && exit 0
+
+    SAVE_DIR=$(backup_current_network)
+
+    if ! sudo nmcli connection modify "$CONNECTION" \
+        ipv4.method auto \
+        ipv4.addresses "" \
+        ipv4.gateway "" \
+        ipv4.dns "" \
+        ipv4.ignore-auto-dns no \
+        connection.autoconnect yes; then
+
+        error_box "DHCP設定の保存に失敗しました。"
+        exit 1
+    fi
+
+    if ! sudo nmcli --wait 30 connection up \
+        "$CONNECTION" ifname "$DEVICE"; then
+
+        error_box \
+"設定は保存されましたが、
+接続の再有効化に失敗しました。
+
+バックアップ:
+$SAVE_DIR"
+        exit 1
+    fi
+
+    sleep 2
+
+    NEW_IP=$(ip -4 -o address show dev "$DEVICE" 2>/dev/null |
+        awk 'NR == 1 {print $4}')
+
+    [ -z "$NEW_IP" ] &&
+        NEW_IP="アドレス取得中"
+
+    whiptail \
+        --title "DHCP設定完了" \
+        --msgbox \
+"DHCP設定へ変更しました。
+
+対象:
+$DEVICE
+
+現在のIP:
+$NEW_IP
+
+変更前バックアップ:
+$SAVE_DIR" \
+        18 72
+
+    exit 0
+fi
+
+NEW_IP=$(whiptail \
+    --title "固定IP設定 - $DEVICE" \
+    --inputbox \
+"固定IPアドレスを入力してください。
+
+対象:
+$DEVICE
+
+接続名:
+$CONNECTION
+
+現在:
+${LIVE_IP:-未設定}
+
+例:
+192.168.11.140" \
+    19 70 \
+    "$CURRENT_IP" \
+    3>&1 1>&2 2>&3)
+
+[ $? -ne 0 ] && exit 0
+
+if ! valid_ipv4 "$NEW_IP"; then
+    error_box "IPアドレスの形式が正しくありません。"
+    exit 1
+fi
+
+PREFIX=$(whiptail \
+    --title "プレフィックス設定" \
+    --inputbox \
+"プレフィックス長を入力してください。
+
+家庭内LANでは通常 24 です。" \
+    13 64 \
+    "$CURRENT_PREFIX" \
+    3>&1 1>&2 2>&3)
+
+[ $? -ne 0 ] && exit 0
+
+if ! [[ "$PREFIX" =~ ^[0-9]+$ ]] ||
+   [ "$PREFIX" -lt 1 ] ||
+   [ "$PREFIX" -gt 32 ]; then
+    error_box "プレフィックス長は1～32で入力してください。"
+    exit 1
+fi
+
+GATEWAY=$(whiptail \
+    --title "ゲートウェイ設定" \
+    --inputbox \
+"ルーターのIPアドレスを入力してください。
+
+例:
+192.168.11.1" \
+    13 64 \
+    "$CURRENT_GATEWAY" \
+    3>&1 1>&2 2>&3)
+
+[ $? -ne 0 ] && exit 0
+
+if ! valid_ipv4 "$GATEWAY"; then
+    error_box "ゲートウェイの形式が正しくありません。"
+    exit 1
+fi
+
+DNS=$(whiptail \
+    --title "DNS設定" \
+    --inputbox \
+"DNSサーバーを空白区切りで入力してください。
+
+例:
+192.168.11.1 8.8.8.8" \
+    14 68 \
+    "$CURRENT_DNS" \
+    3>&1 1>&2 2>&3)
+
+[ $? -ne 0 ] && exit 0
+
+whiptail \
+    --title "最終確認" \
+    --yesno \
+"次の内容で設定します。
+
+対象:
+$DEVICE
+
+接続名:
+$CONNECTION
+
+IPアドレス:
+$NEW_IP/$PREFIX
+
+ゲートウェイ:
+$GATEWAY
+
+DNS:
+$DNS
+
+SSH接続が切れた場合は、新しいIPで接続してください。
+
+実行しますか？" \
+    24 74
+
+[ $? -ne 0 ] && exit 0
+
+SAVE_DIR=$(backup_current_network)
+
+if ! sudo nmcli connection modify "$CONNECTION" \
+    ipv4.method manual \
+    ipv4.addresses "$NEW_IP/$PREFIX" \
+    ipv4.gateway "$GATEWAY" \
+    ipv4.dns "$DNS" \
+    ipv4.ignore-auto-dns yes \
+    connection.autoconnect yes; then
+
+    error_box "固定IP設定の保存に失敗しました。"
+    exit 1
+fi
+
+if ! sudo nmcli --wait 30 connection up \
+    "$CONNECTION" ifname "$DEVICE"; then
+
+    error_box \
+"設定は保存されましたが、
+接続の再有効化に失敗しました。
+
+変更前バックアップ:
+$SAVE_DIR"
+    exit 1
+fi
+
+whiptail \
+    --title "固定IP設定完了" \
+    --msgbox \
+"固定IP設定を完了しました。
+
+対象:
+$DEVICE
+
+新しいIP:
+$NEW_IP/$PREFIX
+
+変更前バックアップ:
+$SAVE_DIR
+
+SSH再接続:
+ssh $(whoami)@$NEW_IP" \
+    20 74
