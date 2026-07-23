@@ -130,22 +130,43 @@ done
 # SVXLink本体
 # ------------------------------------------------------------
 
+print_info "SVXLink本体を確認しています。"
+
 if command -v svxlink >/dev/null 2>&1; then
     print_ok "SVXLink本体はインストール済みです。"
+    print_info "SVXLink実行ファイル: $(command -v svxlink)"
 else
-    print_info "SVXLink本体を確認しています。"
+    SVXLINK_PACKAGES=()
 
-    if apt-cache show svxlink >/dev/null 2>&1; then
-        print_info "SVXLink本体をインストールしています。"
+    if apt-cache show svxlink-server >/dev/null 2>&1; then
+        SVXLINK_PACKAGES+=("svxlink-server")
+    fi
 
-        if apt-get install -y svxlink >>"$LOG_FILE" 2>&1; then
-            print_ok "SVXLink本体をインストールしました。"
+    if apt-cache show svxlink-gpio >/dev/null 2>&1; then
+        SVXLINK_PACKAGES+=("svxlink-gpio")
+    fi
+
+    if [ "${#SVXLINK_PACKAGES[@]}" -gt 0 ]; then
+        print_info "SVXLink関連パッケージをインストールしています。"
+        print_info "対象パッケージ: ${SVXLINK_PACKAGES[*]}"
+
+        if apt-get install -y "${SVXLINK_PACKAGES[@]}" >>"$LOG_FILE" 2>&1; then
+            print_ok "SVXLink関連パッケージをインストールしました。"
+
+            if command -v svxlink >/dev/null 2>&1; then
+                print_ok "SVXLink実行ファイルを確認しました。"
+                print_info "SVXLink実行ファイル: $(command -v svxlink)"
+            else
+                print_info "パッケージはインストールされましたが、svxlinkコマンドを確認できません。"
+                print_info "インストールログを確認してください: $LOG_FILE"
+            fi
         else
-            print_error "SVXLink本体の自動インストールに失敗しました。"
+            print_error "SVXLink関連パッケージのインストールに失敗しました。"
+            print_info "インストールログ: $LOG_FILE"
             print_info "SVXLinkJP本体のインストールは続行します。"
         fi
     else
-        print_info "この環境のAPTにはsvxlinkパッケージがありません。"
+        print_info "この環境のAPTにはsvxlink-server／svxlink-gpioがありません。"
         print_info "SVXLinkJP本体のインストールは続行します。"
     fi
 fi
