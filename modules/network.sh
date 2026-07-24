@@ -14,6 +14,7 @@ show_error()
 run_script()
 {
     local script_file="$1"
+    shift
 
     if [ ! -f "$script_file" ]; then
         show_error "スクリプトが見つかりません。
@@ -26,7 +27,7 @@ $script_file"
         chmod +x "$script_file" 2>/dev/null
     fi
 
-    "$script_file"
+    "$script_file" "$@"
 }
 
 show_networkmanager_status()

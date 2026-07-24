@@ -213,6 +213,7 @@ $CURRENT_METHOD
         exit 1
     fi
 
+    if ! sudo nmcli --wait 30 connection up \
     if ! sudo nmcli device reapply "$DEVICE"    ; then
 
         error_box \
@@ -368,11 +369,13 @@ if ! sudo nmcli connection modify "$CONNECTION" \
     exit 1
 fi
 
-if ! sudo nmcli device reapply "$DEVICE"; then
+if ! sudo nmcli --wait 30 connection up \
+
+if ! sudo nmcli device reapply "$DEVICE"    ; then
 
     error_box \
 "設定は保存されましたが、
-接続の再適用に失敗しました。
+接続の再有効化に失敗しました。
 
 変更前バックアップ:
 $SAVE_DIR"

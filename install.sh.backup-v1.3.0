@@ -2,7 +2,7 @@
 
 # ============================================================
 # SVXLinkJP Installer
-# Version 1.3.0
+# Version 1.1.0
 # ============================================================
 
 set -u
@@ -340,45 +340,4 @@ echo "起動方法:"
 echo
 echo "  svxlinkjp"
 echo
-# ------------------------------------------------------------
-# SVXLinkJP launcher command
-# ------------------------------------------------------------
 
-echo "svxlink 起動コマンドを作成しています..."
-
-sudo tee /usr/local/bin/svxlink >/dev/null <<'EOF'
-#!/bin/bash
-
-PROJECT_DIR="/opt/SVXLinkJP"
-
-if [ ! -f "$PROJECT_DIR/menu.sh" ]; then
-    echo "SVXLinkJPが見つかりません。"
-    echo "確認先: $PROJECT_DIR/menu.sh"
-    exit 1
-fi
-
-exec "$PROJECT_DIR/menu.sh"
-EOF
-
-sudo chmod 755 /usr/local/bin/svxlink
-
-echo "svxlink コマンドを作成しました。"
-sudo tee /usr/local/bin/svxlink >/dev/null <<'EOF'
-#!/bin/bash
-
-if [ -x /opt/SVXLinkJP/menu.sh ]; then
-    exec /opt/SVXLinkJP/menu.sh
-fi
-
-if [ -x "$HOME/SVXLinkJP/menu.sh" ]; then
-    exec "$HOME/SVXLinkJP/menu.sh"
-fi
-
-echo "SVXLinkJPのmenu.shが見つかりません。"
-echo "確認先:"
-echo "  /opt/SVXLinkJP/menu.sh"
-echo "  $HOME/SVXLinkJP/menu.sh"
-exit 1
-EOF
-
-sudo chmod 755 /usr/local/bin/svxlink
