@@ -1,0 +1,874 @@
+#!/bin/bash
+
+# ============================================================
+# SVXLinkJP EchoLink Settings
+# Version 1.1.0
+# ============================================================
+
+set -u
+
+MODULE_NAME="ModuleEchoLink"
+MODULAR_CONFIG="/etc/svxlink/svxlink.d/ModuleEchoLink.conf"
+MAIN_CONFIG="/etc/svxlink/svxlink.conf"
+SERVICE_NAME="svxlink"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+GREEN="\033[32m"
+YELLOW="\033[33m"
+RED="\033[31m"
+CYAN="\033[36m"
+RESET="\033[0m"
+
+pause_screen() {
+    echo
+    read -r -p "Enterキーを押してください..."
+}
+
+print_ok() {
+    echo -e "${GREEN}[ OK ]${RESET} $1"
+}
+
+print_info() {
+    echo -e "${YELLOW}[INFO]${RESET} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${RESET} $1"
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        print_error "この操作には管理者権限が必要です。"
+        echo
+        echo "SVXLinkJPを次のように起動してください。"
+        echo
+        echo "  sudo svxlinkjp"
+        echo
+        pause_screen
+        return 1
+    fi
+
+    return 0
+}
+
+# ------------------------------------------------------------
+# 使用する設定ファイルを判定
+# ------------------------------------------------------------
+
+detect_config_file() {
+    if [ -f "$MODULAR_CONFIG" ]; then
+        CONFIG_FILE="$MODULAR_CONFIG"
+        CONFIG_MODE="modular"
+        return 0
+    fi
+
+    if [ -f "$MAIN_CONFIG" ]; then
+        CONFIG_FILE="$MAIN_CONFIG"
+        CONFIG_MODE="main"
+        return 0
+    fi
+
+    CONFIG_FILE="$MODULAR_CONFIG"
+    CONFIG_MODE="modular-new"
+    return 0
+}
+
+# ------------------------------------------------------------
+# INI形式の値を取得
+# ------------------------------------------------------------
+
+get_config_value() {
+    local key="$1"
+    local file="$CONFIG_FILE"
+
+    [ -f "$file" ] || {
+        echo ""
+        return
+    }
+
+    if [ "$CONFIG_MODE" = "main" ]; then
+        awk -v section="[$MODULE_NAME]" -v key="$key" '
+            BEGIN {
+                in_section = 0
+            }
+
+            /^[[:space:]]*\[/ {
+                in_section = ($0 == section)
+            }
+
+            in_section {
+                line = $0
+                sub(/^[[:space:]]*/, "", line)
+
+                if (line ~ "^" key "[[:space:]]*=") {
+                    sub("^[^=]*=[[:space:]]*", "", line)
+                    sub(/[[:space:]]*$/, "", line)
+                    print line
+                    exit
+                }
+            }
+        ' "$file"
+    else
+        awk -v key="$key" '
+            {
+                line = $0
+                sub(/^[[:space:]]*/, "", line)
+
+                if (line ~ "^" key "[[:space:]]*=") {
+                    sub("^[^=]*=[[:space:]]*", "", line)
+                    sub(/[[:space:]]*$/, "", line)
+                    print line
+                    exit
+                }
+            }
+        ' "$file"
+    fi
+}
+
+# ------------------------------------------------------------
+# 現在値を読み込む
+# ------------------------------------------------------------
+
+load_settings() {
+    detect_config_file
+
+    CALLSIGN="$(get_config_value "CALLSIGN")"
+    SYSOPNAME="$(get_config_value "SYSOPNAME")"
+    PASSWORD="$(get_config_value "PASSWORD")"
+    LOCATION="$(get_config_value "LOCATION")"
+    DESCRIPTION="$(get_config_value "DESCRIPTION")"
+    SERVERS="$(get_config_value "SERVERS")"
+    MAX_QSOS="$(get_config_value "MAX_QSOS")"
+
+    [ -n "$SERVERS" ] || SERVERS="servers.echolink.org"
+    [ -n "$MAX_QSOS" ] || MAX_QSOS="2"
+}
+
+# ------------------------------------------------------------
+# 入力チェック
+# ------------------------------------------------------------
+
+validate_callsign() {
+    local value="$1"
+
+    # 英数字、/、- のみ許可
+    if [[ ! "$value" =~ ^[A-Za-z0-9/-]+$ ]]; then
+        return 1
+    fi
+
+    if [ "${#value}" -lt 3 ] || [ "${#value}" -gt 15 ]; then
+        return 1
+    fi
+
+    return 0
+}
+
+validate_single_line() {
+    local value="$1"
+
+    if [[ "$value" == *$'\n'* ]] || [[ "$value" == *$'\r'* ]]; then
+        return 1
+    fi
+
+    return 0
+}
+
+validate_positive_number() {
+    local value="$1"
+
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    [ "$value" -ge 1 ] || return 1
+    [ "$value" -le 99 ] || return 1
+
+    return 0
+}
+
+# ------------------------------------------------------------
+# 値入力
+# ------------------------------------------------------------
+
+edit_callsign() {
+    clear
+    echo "============================================================"
+    echo "                EchoLink コールサイン"
+    echo "============================================================"
+    echo
+    echo "現在値: ${CALLSIGN:-未設定}"
+    echo
+    echo "例:"
+    echo "  JQ1YOF-L"
+    echo "  JQ1YOF-R"
+    echo
+
+    read -r -p "新しいコールサイン（変更しない場合は空欄）: " value
+
+    [ -n "$value" ] || return
+
+    value="$(echo "$value" | tr '[:lower:]' '[:upper:]')"
+
+    if ! validate_callsign "$value"; then
+        print_error "コールサインの形式が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    CALLSIGN="$value"
+    print_ok "コールサインを仮設定しました。"
+    pause_screen
+}
+
+edit_sysopname() {
+    clear
+    echo "============================================================"
+    echo "                  EchoLink 管理者名"
+    echo "============================================================"
+    echo
+    echo "現在値: ${SYSOPNAME:-未設定}"
+    echo
+
+    read -r -p "新しい管理者名（変更しない場合は空欄）: " value
+
+    [ -n "$value" ] || return
+
+    if ! validate_single_line "$value"; then
+        print_error "入力値が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    SYSOPNAME="$value"
+    print_ok "管理者名を仮設定しました。"
+    pause_screen
+}
+
+edit_location() {
+    clear
+    echo "============================================================"
+    echo "                  EchoLink 設置場所"
+    echo "============================================================"
+    echo
+    echo "現在値: ${LOCATION:-未設定}"
+    echo
+    echo "例:"
+    echo "  [Svx] Chiba, Japan"
+    echo
+
+    read -r -p "新しい設置場所（変更しない場合は空欄）: " value
+
+    [ -n "$value" ] || return
+
+    if ! validate_single_line "$value"; then
+        print_error "入力値が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    LOCATION="$value"
+    print_ok "設置場所を仮設定しました。"
+    pause_screen
+}
+
+edit_password() {
+    clear
+    echo "============================================================"
+    echo "                EchoLink パスワード"
+    echo "============================================================"
+    echo
+    echo "現在値: 設定済みの場合も非表示です"
+    echo
+    echo "入力した文字は画面に表示されません。"
+    echo
+
+    read -r -s -p "新しいパスワード（変更しない場合は空欄）: " value
+    echo
+
+    [ -n "$value" ] || return
+
+    if ! validate_single_line "$value"; then
+        print_error "入力値が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    read -r -s -p "確認のため、もう一度入力してください: " confirm
+    echo
+
+    if [ "$value" != "$confirm" ]; then
+        print_error "パスワードが一致しません。"
+        pause_screen
+        return
+    fi
+
+    PASSWORD="$value"
+    print_ok "パスワードを仮設定しました。"
+    pause_screen
+}
+
+edit_description() {
+    clear
+    echo "============================================================"
+    echo "                  EchoLink 説明文"
+    echo "============================================================"
+    echo
+    echo "現在値:"
+    echo "${DESCRIPTION:-未設定}"
+    echo
+    echo "例:"
+    echo "  SVXLinkJP station, 430MHz, Chiba Japan"
+    echo
+
+    read -r -p "新しい説明文（変更しない場合は空欄）: " value
+
+    [ -n "$value" ] || return
+
+    if ! validate_single_line "$value"; then
+        print_error "説明文は1行で入力してください。"
+        pause_screen
+        return
+    fi
+
+    DESCRIPTION="$value"
+    print_ok "説明文を仮設定しました。"
+    pause_screen
+}
+
+edit_servers() {
+    clear
+    echo "============================================================"
+    echo "             EchoLink ディレクトリサーバー"
+    echo "============================================================"
+    echo
+    echo "現在値: $SERVERS"
+    echo
+    echo "通常は変更する必要はありません。"
+    echo "標準値: servers.echolink.org"
+    echo
+
+    read -r -p "新しいサーバー（変更しない場合は空欄）: " value
+
+    [ -n "$value" ] || return
+
+    if ! validate_single_line "$value"; then
+        print_error "入力値が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    SERVERS="$value"
+    print_ok "ディレクトリサーバーを仮設定しました。"
+    pause_screen
+}
+
+edit_max_qsos() {
+    clear
+    echo "============================================================"
+    echo "                 EchoLink 最大接続数"
+    echo "============================================================"
+    echo
+    echo "現在値: $MAX_QSOS"
+    echo
+
+    read -r -p "最大接続数 1～99（変更しない場合は空欄）: " value
+
+    [ -n "$value" ] || return
+
+    if ! validate_positive_number "$value"; then
+        print_error "1～99の整数を入力してください。"
+        pause_screen
+        return
+    fi
+
+    MAX_QSOS="$value"
+    print_ok "最大接続数を仮設定しました。"
+    pause_screen
+}
+
+# ------------------------------------------------------------
+# 設定表示
+# ------------------------------------------------------------
+
+show_settings() {
+    clear
+    echo "============================================================"
+    echo "                 EchoLink 現在の設定"
+    echo "============================================================"
+    echo
+    echo "設定ファイル : $CONFIG_FILE"
+    echo "コールサイン : ${CALLSIGN:-未設定}"
+    echo "管理者名     : ${SYSOPNAME:-未設定}"
+    echo "設置場所     : ${LOCATION:-未設定}"
+    echo "パスワード   : $([ -n "$PASSWORD" ] && echo "設定済み" || echo "未設定")"
+    echo "説明文       : ${DESCRIPTION:-未設定}"
+    echo "サーバー     : $SERVERS"
+    echo "最大接続数   : $MAX_QSOS"
+    echo
+    pause_screen
+}
+
+# ------------------------------------------------------------
+# 必須項目確認
+# ------------------------------------------------------------
+
+check_required_settings() {
+    local error_count=0
+
+    if [ -z "$CALLSIGN" ]; then
+        print_error "コールサインが未設定です。"
+        error_count=$((error_count + 1))
+    fi
+
+    if [ -z "$PASSWORD" ]; then
+        print_error "パスワードが未設定です。"
+        error_count=$((error_count + 1))
+    fi
+
+    if [ -z "$SYSOPNAME" ]; then
+        print_error "管理者名が未設定です。"
+        error_count=$((error_count + 1))
+    fi
+
+    if [ -z "$LOCATION" ]; then
+        print_error "設置場所が未設定です。"
+        error_count=$((error_count + 1))
+    fi
+
+    [ "$error_count" -eq 0 ]
+}
+
+# ------------------------------------------------------------
+# モジュール設定ファイルを書き出す
+# ------------------------------------------------------------
+
+write_modular_config() {
+    local temp_file="$1"
+
+    cat >"$temp_file" <<EOF
+[ModuleEchoLink]
+NAME=EchoLink
+ID=2
+TIMEOUT=60
+SERVERS=$SERVERS
+CALLSIGN=$CALLSIGN
+PASSWORD=$PASSWORD
+SYSOPNAME=$SYSOPNAME
+LOCATION=$LOCATION
+DESCRIPTION=$DESCRIPTION
+MAX_QSOS=$MAX_QSOS
+EOF
+}
+
+# ------------------------------------------------------------
+# svxlink.conf の対象セクションだけ更新
+# ------------------------------------------------------------
+
+write_main_config() {
+    local source_file="$1"
+    local temp_file="$2"
+    local section_found_file="$3"
+
+    awk \
+        -v section="[$MODULE_NAME]" \
+        -v servers="$SERVERS" \
+        -v callsign="$CALLSIGN" \
+        -v password="$PASSWORD" \
+        -v sysopname="$SYSOPNAME" \
+        -v location="$LOCATION" \
+        -v description="$DESCRIPTION" \
+        -v max_qsos="$MAX_QSOS" \
+        -v found_file="$section_found_file" '
+        function print_section() {
+            print "[ModuleEchoLink]"
+            print "NAME=EchoLink"
+            print "ID=2"
+            print "TIMEOUT=60"
+            print "SERVERS=" servers
+            print "CALLSIGN=" callsign
+            print "PASSWORD=" password
+            print "SYSOPNAME=" sysopname
+            print "LOCATION=" location
+            print "DESCRIPTION=" description
+            print "MAX_QSOS=" max_qsos
+        }
+
+        BEGIN {
+            in_target = 0
+            section_found = 0
+        }
+
+        /^[[:space:]]*\[/ {
+            if ($0 == section) {
+                if (!section_found) {
+                    print_section()
+                    section_found = 1
+                }
+
+                in_target = 1
+                next
+            }
+
+            if (in_target) {
+                in_target = 0
+            }
+        }
+
+        {
+            if (!in_target) {
+                print
+            }
+        }
+
+        END {
+            if (!section_found) {
+                print ""
+                print_section()
+            }
+
+            print section_found > found_file
+        }
+    ' "$source_file" >"$temp_file"
+}
+
+# ------------------------------------------------------------
+# 保存
+# ------------------------------------------------------------
+
+save_settings() {
+    clear
+    echo "============================================================"
+    echo "                  EchoLink 設定保存"
+    echo "============================================================"
+    echo
+
+    if ! require_root; then
+        return
+    fi
+
+    if ! check_required_settings; then
+        echo
+        print_error "必須項目を入力してから保存してください。"
+        pause_screen
+        return
+    fi
+
+    echo "次の内容を保存します。"
+    echo
+    echo "コールサイン : $CALLSIGN"
+    echo "管理者名     : $SYSOPNAME"
+    echo "設置場所     : $LOCATION"
+    echo "パスワード   : ********"
+    echo "説明文       : $DESCRIPTION"
+    echo "サーバー     : $SERVERS"
+    echo "最大接続数   : $MAX_QSOS"
+    echo
+    echo "保存先:"
+    echo "  $CONFIG_FILE"
+    echo
+
+    read -r -p "保存しますか？ [y/N]: " answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            ;;
+        *)
+            print_info "保存を中止しました。"
+            pause_screen
+            return
+            ;;
+    esac
+
+    mkdir -p "$(dirname "$CONFIG_FILE")" || {
+        print_error "設定ディレクトリを作成できませんでした。"
+        pause_screen
+        return
+    }
+
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+    backup_file="${CONFIG_FILE}.backup.${timestamp}"
+    temp_file="$(mktemp)"
+    section_found_file="$(mktemp)"
+
+    trap 'rm -f "$temp_file" "$section_found_file"' RETURN
+
+    if [ -f "$CONFIG_FILE" ]; then
+        cp -a "$CONFIG_FILE" "$backup_file" || {
+            print_error "設定ファイルのバックアップに失敗しました。"
+            pause_screen
+            return
+        }
+
+        print_ok "バックアップを作成しました。"
+        echo "  $backup_file"
+    fi
+
+    if [ "$CONFIG_MODE" = "main" ]; then
+        write_main_config \
+            "$CONFIG_FILE" \
+            "$temp_file" \
+            "$section_found_file"
+    else
+        write_modular_config "$temp_file"
+    fi
+
+    if [ ! -s "$temp_file" ]; then
+        print_error "新しい設定ファイルの生成に失敗しました。"
+        pause_screen
+        return
+    fi
+
+    install -o root -g root -m 600 "$temp_file" "$CONFIG_FILE" || {
+        print_error "設定ファイルの保存に失敗しました。"
+        pause_screen
+        return
+    }
+
+    print_ok "EchoLink設定を保存しました。"
+
+    echo
+    read -r -p "SVXLinkを再起動しますか？ [y/N]: " restart_answer
+
+    case "$restart_answer" in
+        y|Y|yes|YES)
+            if systemctl restart "$SERVICE_NAME"; then
+                print_ok "SVXLinkを再起動しました。"
+            else
+                print_error "SVXLinkの再起動に失敗しました。"
+                echo
+                systemctl status "$SERVICE_NAME" --no-pager -l
+            fi
+            ;;
+        *)
+            print_info "再起動は行いませんでした。"
+            ;;
+    esac
+
+    pause_screen
+}
+
+# ------------------------------------------------------------
+# サービス状態
+# ------------------------------------------------------------
+
+show_service_status() {
+    clear
+    echo "============================================================"
+    echo "                 SVXLink サービス状態"
+    echo "============================================================"
+    echo
+
+    systemctl status "$SERVICE_NAME" --no-pager -l
+
+    pause_screen
+}
+
+# ------------------------------------------------------------
+# EchoLink関連ログ
+# ------------------------------------------------------------
+
+show_echolink_log() {
+    clear
+    echo "============================================================"
+    echo "                   EchoLink ログ"
+    echo "============================================================"
+    echo
+
+    journalctl \
+        -u "$SERVICE_NAME" \
+        -n 100 \
+        --no-pager |
+        grep -iE "echo|login|directory|server|error|fail|connect" ||
+        echo "EchoLink関連ログは見つかりませんでした。"
+
+    pause_screen
+}
+
+# ------------------------------------------------------------
+# ネットワーク確認
+# ------------------------------------------------------------
+
+test_network() {
+    clear
+    echo "============================================================"
+    echo "               EchoLink ネットワーク確認"
+    echo "============================================================"
+    echo
+
+    echo "1. DNS確認"
+    echo "------------------------------------------------------------"
+
+    if getent hosts servers.echolink.org; then
+        print_ok "servers.echolink.org を名前解決できました。"
+    else
+        print_error "EchoLinkサーバーを名前解決できません。"
+    fi
+
+    echo
+    echo "2. インターネット接続確認"
+    echo "------------------------------------------------------------"
+
+    if curl \
+        --silent \
+        --show-error \
+        --head \
+        --max-time 10 \
+        https://www.echolink.org/ \
+        >/dev/null 2>&1; then
+
+        print_ok "EchoLink公式サイトへ接続できました。"
+    else
+        print_error "EchoLink公式サイトへの接続を確認できませんでした。"
+    fi
+
+    echo
+    echo "3. 待受ポート確認"
+    echo "------------------------------------------------------------"
+
+    if command -v ss >/dev/null 2>&1; then
+        ss -lntup |
+            grep -E ':(5198|5199|5200)([[:space:]]|$)' ||
+            echo "5198、5199、5200番ポートの待受は確認できませんでした。"
+    else
+        echo "ssコマンドがありません。"
+    fi
+
+    echo
+    echo "注意:"
+    echo "この試験はEchoLink登録の承認状態までは保証しません。"
+    echo "実際のログイン結果はSVXLinkログで確認してください。"
+
+    pause_screen
+}
+
+# ------------------------------------------------------------
+# 初期設定ウィザード
+# ------------------------------------------------------------
+
+setup_wizard() {
+    clear
+    echo "============================================================"
+    echo "              EchoLink 初期設定ウィザード"
+    echo "============================================================"
+    echo
+    echo "順番にEchoLink情報を入力します。"
+    echo "入力した内容は最後に確認してから保存できます。"
+    echo
+    pause_screen
+
+    edit_callsign
+    edit_password
+    edit_sysopname
+    edit_location
+    edit_description
+
+    show_settings
+
+    echo
+    read -r -p "この内容を保存しますか？ [y/N]: " answer
+
+    case "$answer" in
+        y|Y|yes|YES)
+            save_settings
+            ;;
+        *)
+            print_info "保存は行いませんでした。"
+            pause_screen
+            ;;
+    esac
+}
+
+# ------------------------------------------------------------
+# メインメニュー
+# ------------------------------------------------------------
+
+main_menu() {
+    load_settings
+
+    while true; do
+        clear
+
+        echo "============================================================"
+        echo "                 EchoLink Settings"
+        echo "============================================================"
+        echo
+        echo "設定ファイル:"
+        echo "  $CONFIG_FILE"
+        echo
+        echo "コールサイン : ${CALLSIGN:-未設定}"
+        echo "管理者名     : ${SYSOPNAME:-未設定}"
+        echo "設置場所     : ${LOCATION:-未設定}"
+        echo "パスワード   : $([ -n "$PASSWORD" ] && echo "設定済み" || echo "未設定")"
+        echo
+        echo "1  初期設定ウィザード"
+        echo "2  コールサイン"
+        echo "3  パスワード"
+        echo "4  管理者名"
+        echo "5  設置場所"
+        echo "6  説明文"
+        echo "7  ディレクトリサーバー"
+        echo "8  最大接続数"
+        echo "9  現在の設定を表示"
+        echo "10 設定を保存"
+        echo "11 SVXLinkサービス状態"
+        echo "12 EchoLinkログ"
+        echo "13 ネットワーク確認"
+        echo "0  戻る"
+        echo
+        echo "============================================================"
+
+        read -r -p "選択してください [0-13]: " choice
+
+        case "$choice" in
+            1)
+                setup_wizard
+                load_settings
+                ;;
+            2)
+                edit_callsign
+                ;;
+            3)
+                edit_password
+                ;;
+            4)
+                edit_sysopname
+                ;;
+            5)
+                edit_location
+                ;;
+            6)
+                edit_description
+                ;;
+            7)
+                edit_servers
+                ;;
+            8)
+                edit_max_qsos
+                ;;
+            9)
+                show_settings
+                ;;
+            10)
+                save_settings
+                load_settings
+                ;;
+            11)
+                show_service_status
+                ;;
+            12)
+                show_echolink_log
+                ;;
+            13)
+                test_network
+                ;;
+            0)
+                return 0
+                ;;
+            *)
+                print_error "0～13を入力してください。"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+main_menu

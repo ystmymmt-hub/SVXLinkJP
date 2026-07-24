@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+#
+# SVXLinkJP PowerSW Module
+# Version 1.2.0
+#
+# 機能:
+#   - 外部リレー／電源制御GPIOのON・OFF
+#   - PowerSW GPIO番号と論理設定の保存
+#   - SVXLinkサービス起動・停止・再起動
+#   - Raspberry Pi再起動・安全シャットダウン
+#
+# 注意:
+#   Raspberry Pi自身をシャットダウンした後はSSH接続できません。
+#   遠隔から再び電源を入れるには、外部ネットワークリレー、
+#   別の常時稼働機器、GPIO3起動回路、Pi 5電源ボタン回路などが必要です。
+#
+
+set -u
+
+POWERSW_CONFIG="${POWERSW_CONFIG:-/etc/svxlinkjp/powersw.conf}"
+
+POWER_GPIO=""
+POWER_ACTIVE_LOW="0"
+POWER_NAME="External Power"
+POWER_STATE="OFF"
+
+pause_screen()
+{
+    echo
+    read -r -p "Enterキーを押してください..." _
+}
+
+clear_screen()
+{
+    command -v clear >/dev/null 2>&1 && clear
+}
+
+print_header()
+{
+    clear_screen
+    echo "========================================"
+    echo " SVXLinkJP PowerSW Ver.1.2.0"
+    echo "========================================"
+    echo
+}
+
+run_as_root()
+{
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+is_valid_gpio()
+{
+    [[ "${1:-}" =~ ^[0-9]+$ ]] &&
+        [ "$1" -ge 0 ] &&
+        [ "$1" -le 53 ]
+}
+
+find_gpio_command()
+{
+    if command -v pinctrl >/dev/null 2>&1; then
+        printf '%s\n' "pinctrl"
+        return 0
+    fi
+
+    if command -v raspi-gpio >/dev/null 2>&1; then
+        printf '%s\n' "raspi-gpio"
+        return 0
+    fi
+
+    printf '%s\n' ""
+    return 1
+}
+
+load_config()
+{
+    local value
+
+    [ -f "$POWERSW_CONFIG" ] || return 0
+
+    value="$(
+        grep -m1 '^POWER_GPIO=' "$POWERSW_CONFIG" 2>/dev/null |
+        cut -d= -f2-
+    )"
+    [ -n "$value" ] && POWER_GPIO="$value"
+
+    value="$(
+        grep -m1 '^POWER_ACTIVE_LOW=' "$POWERSW_CONFIG" 2>/dev/null |
+        cut -d= -f2-
+    )"
+    [ -n "$value" ] && POWER_ACTIVE_LOW="$value"
+
+    value="$(
+        grep -m1 '^POWER_NAME=' "$POWERSW_CONFIG" 2>/dev/null |
+        cut -d= -f2-
+    )"
+    [ -n "$value" ] && POWER_NAME="$value"
+
+    value="$(
+        grep -m1 '^POWER_STATE=' "$POWERSW_CONFIG" 2>/dev/null |
+        cut -d= -f2-
+    )"
+    [ -n "$value" ] && POWER_STATE="$value"
+}
+
+save_config()
+{
+    local temp_file
+
+    temp_file="$(mktemp)"
+
+    cat > "$temp_file" <<CONFIG
+# SVXLinkJP PowerSW configuration
+POWER_GPIO=$POWER_GPIO
+POWER_ACTIVE_LOW=$POWER_ACTIVE_LOW
+POWER_NAME=$POWER_NAME
+POWER_STATE=$POWER_STATE
+CONFIG
+
+    run_as_root mkdir -p "$(dirname "$POWERSW_CONFIG")" || {
+        rm -f "$temp_file"
+        return 1
+    }
+
+    run_as_root install -m 600 "$temp_file" "$POWERSW_CONFIG"
+    local result=$?
+
+    rm -f "$temp_file"
+    return "$result"
+}
+
+set_gpio_level()
+{
+    local level="$1"
+    local gpio_command
+
+    if [ -z "$POWER_GPIO" ]; then
+        echo "PowerSW GPIOが未設定です。"
+        return 1
+    fi
+
+    gpio_command="$(find_gpio_command)" || {
+        echo "GPIO制御コマンドが見つかりません。"
+        echo
+        echo "Raspberry Pi OSではpinctrlを使用します。"
+        echo "古い環境ではraspi-gpioを使用します。"
+        return 1
+    }
+
+    case "$gpio_command" in
+        pinctrl)
+            if [ "$level" = "1" ]; then
+                run_as_root pinctrl set "$POWER_GPIO" op dh
+            else
+                run_as_root pinctrl set "$POWER_GPIO" op dl
+            fi
+            ;;
+
+        raspi-gpio)
+            if [ "$level" = "1" ]; then
+                run_as_root raspi-gpio set "$POWER_GPIO" op dh
+            else
+                run_as_root raspi-gpio set "$POWER_GPIO" op dl
+            fi
+            ;;
+    esac
+}
+
+power_on()
+{
+    local output_level
+
+    print_header
+
+    if [ -z "$POWER_GPIO" ]; then
+        echo "PowerSW GPIOが未設定です。"
+        pause_screen
+        return
+    fi
+
+    if [ "$POWER_ACTIVE_LOW" = "1" ]; then
+        output_level="0"
+    else
+        output_level="1"
+    fi
+
+    echo "${POWER_NAME}をONにします。"
+    echo "GPIO: $POWER_GPIO"
+    echo
+
+    if set_gpio_level "$output_level"; then
+        POWER_STATE="ON"
+        save_config || true
+        echo "PowerSWをONにしました。"
+    else
+        echo "PowerSWをONにできませんでした。"
+    fi
+
+    pause_screen
+}
+
+power_off()
+{
+    local output_level
+    local answer
+
+    print_header
+
+    if [ -z "$POWER_GPIO" ]; then
+        echo "PowerSW GPIOが未設定です。"
+        pause_screen
+        return
+    fi
+
+    echo "警告"
+    echo "----------------------------------------"
+    echo "${POWER_NAME}の電源をOFFにします。"
+    echo
+    echo "GPIO: $POWER_GPIO"
+    echo
+
+    read -r -p "電源をOFFにしますか？ [y/N]: " answer
+
+    case "$answer" in
+        y|Y)
+            ;;
+        *)
+            echo "中止しました。"
+            pause_screen
+            return
+            ;;
+    esac
+
+    if [ "$POWER_ACTIVE_LOW" = "1" ]; then
+        output_level="1"
+    else
+        output_level="0"
+    fi
+
+    if set_gpio_level "$output_level"; then
+        POWER_STATE="OFF"
+        save_config || true
+        echo "PowerSWをOFFにしました。"
+    else
+        echo "PowerSWをOFFにできませんでした。"
+    fi
+
+    pause_screen
+}
+
+power_pulse()
+{
+    local active_level
+    local inactive_level
+    local seconds
+    local answer
+
+    print_header
+
+    if [ -z "$POWER_GPIO" ]; then
+        echo "PowerSW GPIOが未設定です。"
+        pause_screen
+        return
+    fi
+
+    read -r -p "パルス時間を秒で入力してください [1]: " seconds
+    seconds="${seconds:-1}"
+
+    if ! [[ "$seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "時間の入力が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    echo
+    echo "${POWER_NAME}へ${seconds}秒のパルスを出力します。"
+    read -r -p "実行しますか？ [y/N]: " answer
+
+    case "$answer" in
+        y|Y)
+            ;;
+        *)
+            echo "中止しました。"
+            pause_screen
+            return
+            ;;
+    esac
+
+    if [ "$POWER_ACTIVE_LOW" = "1" ]; then
+        active_level="0"
+        inactive_level="1"
+    else
+        active_level="1"
+        inactive_level="0"
+    fi
+
+    if set_gpio_level "$active_level"; then
+        sleep "$seconds"
+        set_gpio_level "$inactive_level"
+        POWER_STATE="OFF"
+        save_config || true
+        echo "PowerSWパルスを出力しました。"
+    else
+        echo "PowerSWパルスを出力できませんでした。"
+    fi
+
+    pause_screen
+}
+
+configure_powersw()
+{
+    local gpio
+    local polarity
+    local name
+    local answer
+
+    print_header
+
+    echo "PowerSW GPIO設定"
+    echo "----------------------------------------"
+    echo
+    echo "GPIOにはリレーを直接接続しないでください。"
+    echo "トランジスタ、MOSFET、リレーモジュール、"
+    echo "またはフォトカプラを使用してください。"
+    echo
+    echo "現在のGPIO: ${POWER_GPIO:-未設定}"
+    echo
+
+    read -r -p "使用するBCM GPIO番号を入力してください: " gpio
+
+    if ! is_valid_gpio "$gpio"; then
+        echo "GPIO番号が正しくありません。"
+        pause_screen
+        return
+    fi
+
+    echo
+    echo "リレーの動作論理を選択してください。"
+    echo " 1. Active High：HIGHでON"
+    echo " 2. Active Low ：LOWでON"
+    echo
+
+    read -r -p "選択 [1]: " polarity
+
+    case "${polarity:-1}" in
+        1)
+            POWER_ACTIVE_LOW="0"
+            ;;
+        2)
+            POWER_ACTIVE_LOW="1"
+            ;;
+        *)
+            echo "選択が正しくありません。"
+            pause_screen
+            return
+            ;;
+    esac
+
+    echo
+    read -r -p \
+        "機器名を入力してください [External Power]: " name
+
+    POWER_GPIO="$gpio"
+    POWER_NAME="${name:-External Power}"
+
+    echo
+    echo "保存内容"
+    echo "----------------------------------------"
+    echo "機器名       : $POWER_NAME"
+    echo "GPIO         : $POWER_GPIO"
+    echo "Active Low   : $POWER_ACTIVE_LOW"
+    echo
+
+    read -r -p "設定を保存しますか？ [Y/n]: " answer
+
+    case "${answer:-Y}" in
+        y|Y)
+            if save_config; then
+                echo "PowerSW設定を保存しました。"
+                echo "$POWERSW_CONFIG"
+            else
+                echo "設定を保存できませんでした。"
+            fi
+            ;;
+        *)
+            echo "保存を中止しました。"
+            ;;
+    esac
+
+    pause_screen
+}
+
+show_status()
+{
+    local gpio_command
+
+    print_header
+
+    gpio_command="$(find_gpio_command 2>/dev/null || true)"
+
+    echo "PowerSW状態"
+    echo "----------------------------------------"
+    echo "機器名       : $POWER_NAME"
+    echo "GPIO         : ${POWER_GPIO:-未設定}"
+    echo "Active Low   : $POWER_ACTIVE_LOW"
+    echo "記録状態     : $POWER_STATE"
+    echo "GPIOコマンド : ${gpio_command:-利用不可}"
+    echo "設定ファイル : $POWERSW_CONFIG"
+    echo
+
+    if [ -n "$POWER_GPIO" ] && [ "$gpio_command" = "pinctrl" ]; then
+        echo "GPIO実状態"
+        echo "----------------------------------------"
+        run_as_root pinctrl get "$POWER_GPIO" 2>&1 || true
+    elif [ -n "$POWER_GPIO" ] &&
+        [ "$gpio_command" = "raspi-gpio" ]; then
+        echo "GPIO実状態"
+        echo "----------------------------------------"
+        run_as_root raspi-gpio get "$POWER_GPIO" 2>&1 || true
+    fi
+
+    pause_screen
+}
+
+detect_service_name()
+{
+    local unit
+
+    for unit in svxlink.service svxlink-server.service; do
+        if systemctl list-unit-files "$unit" \
+            --no-legend 2>/dev/null |
+            grep -q "^${unit}"; then
+            printf '%s\n' "$unit"
+            return 0
+        fi
+    done
+
+    printf '%s\n' ""
+}
+
+svxlink_service_action()
+{
+    local action="$1"
+    local service_name
+
+    print_header
+
+    service_name="$(detect_service_name)"
+
+    if [ -z "$service_name" ]; then
+        echo "SVXLinkサービスが見つかりません。"
+        pause_screen
+        return
+    fi
+
+    case "$action" in
+        start)
+            echo "SVXLinkを起動します..."
+            run_as_root systemctl start "$service_name"
+            ;;
+
+        stop)
+            echo "SVXLinkを停止します..."
+            run_as_root systemctl stop "$service_name"
+            ;;
+
+        restart)
+            echo "SVXLinkを再起動します..."
+            run_as_root systemctl restart "$service_name"
+            ;;
+    esac
+
+    echo
+    systemctl is-active "$service_name" 2>/dev/null || true
+    systemctl status "$service_name" \
+        --no-pager --lines=8 2>/dev/null || true
+
+    pause_screen
+}
+
+reboot_raspberry_pi()
+{
+    local answer
+
+    print_header
+
+    echo "Raspberry Piを再起動します。"
+    echo "SSH接続は一度切断されます。"
+    echo
+
+    read -r -p "本当に再起動しますか？ [y/N]: " answer
+
+    case "$answer" in
+        y|Y)
+            echo
+            echo "3秒後に再起動します..."
+            sleep 3
+            run_as_root systemctl reboot
+            ;;
+        *)
+            echo "再起動を中止しました。"
+            pause_screen
+            ;;
+    esac
+}
+
+shutdown_raspberry_pi()
+{
+    local answer
+
+    print_header
+
+    echo "警告"
+    echo "========================================"
+    echo "Raspberry Piを安全にシャットダウンします。"
+    echo
+    echo "実行後はSSH接続が切断されます。"
+    echo "このRaspberry Pi自身へSSH接続して"
+    echo "再び電源をONにすることはできません。"
+    echo
+    echo "再起動には次のいずれかが必要です。"
+    echo "・外部ネットワークリレー"
+    echo "・別の常時稼働Raspberry Pi"
+    echo "・GPIO3とGNDを短絡する外部回路"
+    echo "・Pi 5の電源ボタン端子を操作する外部回路"
+    echo
+
+    read -r -p \
+        "本当にシャットダウンしますか？ [y/N]: " answer
+
+    case "$answer" in
+        y|Y)
+            echo
+            echo "5秒後にシャットダウンします..."
+            sleep 5
+            run_as_root systemctl poweroff
+            ;;
+        *)
+            echo "シャットダウンを中止しました。"
+            pause_screen
+            ;;
+    esac
+}
+
+powersw_menu()
+{
+    local choice
+
+    load_config
+
+    while true; do
+        print_header
+
+        echo " 機器名 : $POWER_NAME"
+        echo " GPIO   : ${POWER_GPIO:-未設定}"
+        echo " 状態   : $POWER_STATE"
+        echo
+        echo " 1. 外部電源 PowerSW ON"
+        echo " 2. 外部電源 PowerSW OFF"
+        echo " 3. PowerSWパルス出力"
+        echo " 4. PowerSW GPIO設定"
+        echo " 5. PowerSW状態表示"
+        echo
+        echo " 6. SVXLink起動"
+        echo " 7. SVXLink停止"
+        echo " 8. SVXLink再起動"
+        echo
+        echo " 9. Raspberry Pi再起動"
+        echo "10. Raspberry Piシャットダウン"
+        echo " 0. 戻る"
+        echo
+
+        read -r -p "選択してください: " choice
+
+        case "$choice" in
+            1)
+                power_on
+                ;;
+            2)
+                power_off
+                ;;
+            3)
+                power_pulse
+                ;;
+            4)
+                configure_powersw
+                ;;
+            5)
+                show_status
+                ;;
+            6)
+                svxlink_service_action start
+                ;;
+            7)
+                svxlink_service_action stop
+                ;;
+            8)
+                svxlink_service_action restart
+                ;;
+            9)
+                reboot_raspberry_pi
+                ;;
+            10)
+                shutdown_raspberry_pi
+                ;;
+            0)
+                return 0
+                ;;
+            *)
+                echo
+                echo "正しい番号を入力してください。"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    powersw_menu
+fi

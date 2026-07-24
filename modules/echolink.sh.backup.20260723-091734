@@ -1,0 +1,916 @@
+#!/bin/bash
+
+# ============================================================
+# SVXLinkJP EchoLink Settings
+# Dialog TUI Version
+# Version 2.0.0
+# ============================================================
+
+set -u
+
+MODULE_NAME="ModuleEchoLink"
+
+SVXLINK_CONF="/etc/svxlink/svxlink.conf"
+ECHOLINK_CONF="/etc/svxlink/svxlink.d/ModuleEchoLink.conf"
+ECHOLINK_DIR="$(dirname "$ECHOLINK_CONF")"
+
+SVXLINK_SERVICE="svxlink.service"
+
+TEMP_DIR="/tmp/svxlinkjp"
+RESULT_FILE="${TEMP_DIR}/echolink_result.$$"
+VIEW_FILE="${TEMP_DIR}/echolink_view.$$"
+LOG_FILE="${TEMP_DIR}/echolink_log.$$"
+
+mkdir -p "$TEMP_DIR"
+
+cleanup() {
+    rm -f \
+        "$RESULT_FILE" \
+        "$VIEW_FILE" \
+        "$LOG_FILE"
+
+    clear
+}
+
+trap cleanup EXIT
+trap cleanup INT TERM
+
+# ------------------------------------------------------------
+# 初期値
+# ------------------------------------------------------------
+
+CALLSIGN=""
+PASSWORD=""
+SYSOPNAME=""
+LOCATION=""
+DESCRIPTION=""
+SERVERS="servers.echolink.org"
+MAX_QSOS="10"
+
+CHANGED=0
+
+# ------------------------------------------------------------
+# 共通処理
+# ------------------------------------------------------------
+
+run_as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+show_message() {
+    local title="$1"
+    local message="$2"
+
+    dialog \
+        --clear \
+        --no-shadow \
+        --title "$title" \
+        --msgbox "$message" \
+        12 70
+}
+
+show_error() {
+    local message="$1"
+
+    show_message "エラー" "$message"
+}
+
+show_info() {
+    local message="$1"
+
+    show_message "情報" "$message"
+}
+
+show_text_file() {
+    local title="$1"
+    local file="$2"
+
+    if [ ! -f "$file" ]; then
+        show_error "表示するファイルがありません。"
+        return
+    fi
+
+    dialog \
+        --clear \
+        --no-shadow \
+        --title "$title" \
+        --textbox "$file" \
+        22 78
+}
+
+confirm_dialog() {
+    local title="$1"
+    local message="$2"
+
+    dialog \
+        --clear \
+        --no-shadow \
+        --title "$title" \
+        --yesno "$message" \
+        11 68
+}
+
+# ------------------------------------------------------------
+# 設定値取得
+# ------------------------------------------------------------
+
+read_config_value() {
+    local key="$1"
+    local default_value="$2"
+    local value=""
+
+    if [ -f "$ECHOLINK_CONF" ]; then
+        value="$(
+            grep -E "^[[:space:]]*${key}[[:space:]]*=" \
+                "$ECHOLINK_CONF" 2>/dev/null |
+            tail -n 1 |
+            cut -d= -f2-
+        )"
+    fi
+
+    value="$(
+        printf '%s' "$value" |
+        sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+    )"
+
+    if [ -z "$value" ]; then
+        value="$default_value"
+    fi
+
+    printf '%s' "$value"
+}
+
+load_settings() {
+    CALLSIGN="$(read_config_value CALLSIGN "")"
+    PASSWORD="$(read_config_value PASSWORD "")"
+    SYSOPNAME="$(read_config_value SYSOPNAME "")"
+    LOCATION="$(read_config_value LOCATION "")"
+    DESCRIPTION="$(read_config_value DESCRIPTION "")"
+    SERVERS="$(read_config_value SERVERS "servers.echolink.org")"
+    MAX_QSOS="$(read_config_value MAX_QSOS "10")"
+
+    CHANGED=0
+}
+
+# ------------------------------------------------------------
+# 入力画面
+# ------------------------------------------------------------
+
+input_text_value() {
+    local title="$1"
+    local message="$2"
+    local current_value="$3"
+    local result=""
+
+    dialog \
+        --clear \
+        --no-shadow \
+        --title "$title" \
+        --inputbox "$message" \
+        11 70 \
+        "$current_value" \
+        2>"$RESULT_FILE"
+
+    if [ "$?" -ne 0 ]; then
+        return 1
+    fi
+
+    result="$(cat "$RESULT_FILE")"
+    printf '%s' "$result"
+}
+
+set_callsign() {
+    local value=""
+
+    value="$(
+        input_text_value \
+            "Callsign" \
+            "EchoLinkコールサインを入力してください。\n例: JQ1YOF-L" \
+            "$CALLSIGN"
+    )" || return
+
+    value="$(printf '%s' "$value" | tr '[:lower:]' '[:upper:]')"
+
+    if [ -z "$value" ]; then
+        show_error "コールサインは空欄にできません。"
+        return
+    fi
+
+    if ! printf '%s' "$value" |
+        grep -Eq '^[A-Z0-9]+(-[LR])?$'; then
+
+        show_error \
+"コールサインの形式を確認してください。
+
+例:
+JQ1YOF
+JQ1YOF-L
+JQ1YOF-R"
+        return
+    fi
+
+    CALLSIGN="$value"
+    CHANGED=1
+}
+
+set_password() {
+    local value=""
+
+    dialog \
+        --clear \
+        --no-shadow \
+        --title "EchoLink Password" \
+        --insecure \
+        --passwordbox \
+"EchoLinkパスワードを入力してください。
+
+入力文字は画面上で隠されます。" \
+        12 68 \
+        2>"$RESULT_FILE"
+
+    if [ "$?" -ne 0 ]; then
+        return
+    fi
+
+    value="$(cat "$RESULT_FILE")"
+
+    if [ -z "$value" ]; then
+        show_error "パスワードは空欄にできません。"
+        return
+    fi
+
+    PASSWORD="$value"
+    CHANGED=1
+}
+
+set_sysop_name() {
+    local value=""
+
+    value="$(
+        input_text_value \
+            "Sysop Name" \
+            "運用者名または局名を入力してください。" \
+            "$SYSOPNAME"
+    )" || return
+
+    SYSOPNAME="$value"
+    CHANGED=1
+}
+
+set_location() {
+    local value=""
+
+    value="$(
+        input_text_value \
+            "Location" \
+            "設置場所を入力してください。\n例: Tokyo Japan" \
+            "$LOCATION"
+    )" || return
+
+    LOCATION="$value"
+    CHANGED=1
+}
+
+set_description() {
+    local value=""
+
+    value="$(
+        input_text_value \
+            "Description" \
+            "局の説明を入力してください。" \
+            "$DESCRIPTION"
+    )" || return
+
+    DESCRIPTION="$value"
+    CHANGED=1
+}
+
+set_servers() {
+    local value=""
+
+    value="$(
+        input_text_value \
+            "EchoLink Servers" \
+            "EchoLinkディレクトリサーバーを入力してください。" \
+            "$SERVERS"
+    )" || return
+
+    if [ -z "$value" ]; then
+        show_error "サーバー名は空欄にできません。"
+        return
+    fi
+
+    SERVERS="$value"
+    CHANGED=1
+}
+
+set_max_qsos() {
+    local value=""
+
+    value="$(
+        input_text_value \
+            "MAX QSOs" \
+            "同時接続可能数を入力してください。" \
+            "$MAX_QSOS"
+    )" || return
+
+    if ! printf '%s' "$value" |
+        grep -Eq '^[0-9]+$'; then
+
+        show_error "MAX_QSOSは数字で入力してください。"
+        return
+    fi
+
+    if [ "$value" -lt 1 ] || [ "$value" -gt 100 ]; then
+        show_error "MAX_QSOSは1～100で設定してください。"
+        return
+    fi
+
+    MAX_QSOS="$value"
+    CHANGED=1
+}
+
+# ------------------------------------------------------------
+# 設定表示
+# ------------------------------------------------------------
+
+masked_password() {
+    if [ -z "$PASSWORD" ]; then
+        echo "未設定"
+    else
+        printf '%*s' "${#PASSWORD}" "" |
+        tr ' ' '*'
+    fi
+}
+
+show_current_settings() {
+    cat >"$VIEW_FILE" <<EOF
+============================================================
+                EchoLink Current Settings
+============================================================
+
+設定ファイル
+------------------------------------------------------------
+$ECHOLINK_CONF
+
+設定内容
+------------------------------------------------------------
+CALLSIGN    : ${CALLSIGN:-未設定}
+PASSWORD    : $(masked_password)
+SYSOPNAME   : ${SYSOPNAME:-未設定}
+LOCATION    : ${LOCATION:-未設定}
+DESCRIPTION : ${DESCRIPTION:-未設定}
+SERVERS     : ${SERVERS:-未設定}
+MAX_QSOS    : ${MAX_QSOS:-未設定}
+
+変更状態
+------------------------------------------------------------
+EOF
+
+    if [ "$CHANGED" -eq 1 ]; then
+        echo "未保存の変更があります。" >>"$VIEW_FILE"
+    else
+        echo "保存後の設定です。" >>"$VIEW_FILE"
+    fi
+
+    show_text_file \
+        "EchoLink現在設定" \
+        "$VIEW_FILE"
+}
+
+# ------------------------------------------------------------
+# 設定診断
+# ------------------------------------------------------------
+
+module_registered() {
+    if [ ! -f "$SVXLINK_CONF" ]; then
+        return 1
+    fi
+
+    grep -E '^[[:space:]]*MODULES[[:space:]]*=' \
+        "$SVXLINK_CONF" |
+    grep -q "$MODULE_NAME"
+}
+
+diagnosis() {
+    local error_count=0
+
+    cat >"$VIEW_FILE" <<EOF
+============================================================
+                  EchoLink Diagnosis
+============================================================
+
+設定ファイル
+------------------------------------------------------------
+EOF
+
+    if [ -f "$SVXLINK_CONF" ]; then
+        echo "[ OK ] $SVXLINK_CONF" >>"$VIEW_FILE"
+    else
+        echo "[ NG ] $SVXLINK_CONF がありません。" >>"$VIEW_FILE"
+        error_count=$((error_count + 1))
+    fi
+
+    if [ -f "$ECHOLINK_CONF" ]; then
+        echo "[ OK ] $ECHOLINK_CONF" >>"$VIEW_FILE"
+    else
+        echo "[ NG ] $ECHOLINK_CONF がありません。" >>"$VIEW_FILE"
+        error_count=$((error_count + 1))
+    fi
+
+    cat >>"$VIEW_FILE" <<EOF
+
+ModuleEchoLink登録
+------------------------------------------------------------
+EOF
+
+    if module_registered; then
+        echo "[ OK ] MODULESにModuleEchoLinkが登録されています。" \
+            >>"$VIEW_FILE"
+    else
+        echo "[ NG ] MODULESにModuleEchoLinkがありません。" \
+            >>"$VIEW_FILE"
+
+        error_count=$((error_count + 1))
+    fi
+
+    cat >>"$VIEW_FILE" <<EOF
+
+入力内容
+------------------------------------------------------------
+EOF
+
+    if [ -n "$CALLSIGN" ]; then
+        echo "[ OK ] CALLSIGN=$CALLSIGN" >>"$VIEW_FILE"
+    else
+        echo "[ NG ] CALLSIGNが未設定です。" >>"$VIEW_FILE"
+        error_count=$((error_count + 1))
+    fi
+
+    if [ -n "$PASSWORD" ]; then
+        echo "[ OK ] PASSWORDは設定されています。" >>"$VIEW_FILE"
+    else
+        echo "[ NG ] PASSWORDが未設定です。" >>"$VIEW_FILE"
+        error_count=$((error_count + 1))
+    fi
+
+    if [ -n "$SERVERS" ]; then
+        echo "[ OK ] SERVERS=$SERVERS" >>"$VIEW_FILE"
+    else
+        echo "[ NG ] SERVERSが未設定です。" >>"$VIEW_FILE"
+        error_count=$((error_count + 1))
+    fi
+
+    if printf '%s' "$MAX_QSOS" |
+        grep -Eq '^[0-9]+$'; then
+
+        echo "[ OK ] MAX_QSOS=$MAX_QSOS" >>"$VIEW_FILE"
+    else
+        echo "[ NG ] MAX_QSOSが不正です。" >>"$VIEW_FILE"
+        error_count=$((error_count + 1))
+    fi
+
+    cat >>"$VIEW_FILE" <<EOF
+
+診断結果
+------------------------------------------------------------
+EOF
+
+    if [ "$error_count" -eq 0 ]; then
+        echo "[ OK ] EchoLink基本設定に問題はありません。" \
+            >>"$VIEW_FILE"
+    else
+        echo "[ NG ] ${error_count}件の確認項目があります。" \
+            >>"$VIEW_FILE"
+    fi
+
+    show_text_file \
+        "EchoLink診断" \
+        "$VIEW_FILE"
+}
+
+# ------------------------------------------------------------
+# ModuleEchoLink自動登録
+# ------------------------------------------------------------
+
+register_module() {
+    local temp_conf="${TEMP_DIR}/svxlink_conf.$$"
+
+    if [ ! -f "$SVXLINK_CONF" ]; then
+        show_error \
+"svxlink.confが見つかりません。
+
+$SVXLINK_CONF"
+        return 1
+    fi
+
+    if module_registered; then
+        show_info \
+"ModuleEchoLinkはすでに登録されています。"
+        return 0
+    fi
+
+    confirm_dialog \
+        "Module Registration" \
+"svxlink.confのMODULES行へ
+ModuleEchoLinkを追加します。
+
+実行してよろしいですか？"
+
+    if [ "$?" -ne 0 ]; then
+        return 1
+    fi
+
+    cp "$SVXLINK_CONF" "$temp_conf" || {
+        show_error "一時ファイルの作成に失敗しました。"
+        return 1
+    }
+
+    if grep -Eq '^[[:space:]]*MODULES[[:space:]]*=' \
+        "$temp_conf"; then
+
+        sed -i \
+            '/^[[:space:]]*MODULES[[:space:]]*=/{
+                /ModuleEchoLink/! s/$/,ModuleEchoLink/
+            }' \
+            "$temp_conf"
+    else
+        rm -f "$temp_conf"
+
+        show_error \
+"MODULES行が見つかりませんでした。
+
+svxlink.confを確認してください。"
+        return 1
+    fi
+
+    run_as_root cp \
+        "$SVXLINK_CONF" \
+        "${SVXLINK_CONF}.backup.$(date +%Y%m%d-%H%M%S)" ||
+        true
+
+    if run_as_root install \
+        -m 644 \
+        -o root \
+        -g root \
+        "$temp_conf" \
+        "$SVXLINK_CONF"; then
+
+        show_info \
+"ModuleEchoLinkを登録しました。
+
+$SVXLINK_CONF"
+    else
+        show_error \
+"ModuleEchoLinkの登録に失敗しました。"
+        rm -f "$temp_conf"
+        return 1
+    fi
+
+    rm -f "$temp_conf"
+    return 0
+}
+
+# ------------------------------------------------------------
+# 保存
+# ------------------------------------------------------------
+
+save_settings() {
+    local temp_config="${TEMP_DIR}/ModuleEchoLink.conf.$$"
+    local backup_file=""
+
+    if [ -z "$CALLSIGN" ]; then
+        show_error "CALLSIGNが未設定です。"
+        return
+    fi
+
+    if [ -z "$PASSWORD" ]; then
+        show_error "PASSWORDが未設定です。"
+        return
+    fi
+
+    if [ -z "$SERVERS" ]; then
+        show_error "SERVERSが未設定です。"
+        return
+    fi
+
+    confirm_dialog \
+        "EchoLink設定保存" \
+"EchoLink設定を保存します。
+
+保存先:
+$ECHOLINK_CONF
+
+実行してよろしいですか？"
+
+    if [ "$?" -ne 0 ]; then
+        return
+    fi
+
+    cat >"$temp_config" <<EOF
+[ModuleEchoLink]
+NAME=EchoLink
+ID=2
+TIMEOUT=60
+MUTE_LOGIC_LINKING=1
+CONNECT_LOGICS=SimplexLogic:99
+DEFAULT_LANG=en_US
+CALLSIGN=$CALLSIGN
+PASSWORD=$PASSWORD
+SYSOPNAME=$SYSOPNAME
+LOCATION=$LOCATION
+DESCRIPTION=$DESCRIPTION
+SERVERS=$SERVERS
+MAX_QSOS=$MAX_QSOS
+MAX_CONNECTIONS=$MAX_QSOS
+EOF
+
+    run_as_root mkdir -p "$ECHOLINK_DIR"
+
+    if [ -f "$ECHOLINK_CONF" ]; then
+        backup_file="${ECHOLINK_CONF}.backup.$(date +%Y%m%d-%H%M%S)"
+
+        run_as_root cp \
+            "$ECHOLINK_CONF" \
+            "$backup_file" || {
+            show_error "既存設定のバックアップに失敗しました。"
+            rm -f "$temp_config"
+            return
+        }
+    fi
+
+    if run_as_root install \
+        -m 640 \
+        -o root \
+        -g svxlink \
+        "$temp_config" \
+        "$ECHOLINK_CONF"; then
+
+        CHANGED=0
+
+        if module_registered; then
+            show_message \
+                "保存完了" \
+"EchoLink設定を保存しました。
+
+$ECHOLINK_CONF"
+        else
+            dialog \
+                --clear \
+                --no-shadow \
+                --title "保存完了" \
+                --yesno \
+"EchoLink設定を保存しました。
+
+ModuleEchoLinkがメイン設定に
+登録されていません。
+
+続けて自動登録しますか？" \
+                13 68
+
+            if [ "$?" -eq 0 ]; then
+                register_module
+            fi
+        fi
+    else
+        show_error "EchoLink設定の保存に失敗しました。"
+    fi
+
+    rm -f "$temp_config"
+}
+
+# ------------------------------------------------------------
+# SVXLink再起動
+# ------------------------------------------------------------
+
+restart_svxlink() {
+    confirm_dialog \
+        "SVXLink再起動" \
+"SVXLinkサービスを再起動します。
+
+実行してよろしいですか？"
+
+    if [ "$?" -ne 0 ]; then
+        return
+    fi
+
+    run_as_root systemctl reset-failed \
+        "$SVXLINK_SERVICE" \
+        >/dev/null 2>&1 || true
+
+    if run_as_root systemctl restart \
+        "$SVXLINK_SERVICE" \
+        >"$LOG_FILE" 2>&1; then
+
+        sleep 2
+
+        if systemctl is-active \
+            --quiet \
+            "$SVXLINK_SERVICE"; then
+
+            show_info "SVXLinkを再起動しました。"
+        else
+            run_as_root journalctl \
+                -u "$SVXLINK_SERVICE" \
+                -n 60 \
+                --no-pager \
+                >"$LOG_FILE" 2>&1 || true
+
+            show_text_file \
+                "SVXLink再起動エラー" \
+                "$LOG_FILE"
+        fi
+    else
+        run_as_root journalctl \
+            -u "$SVXLINK_SERVICE" \
+            -n 60 \
+            --no-pager \
+            >"$LOG_FILE" 2>&1 || true
+
+        show_text_file \
+            "SVXLink再起動エラー" \
+            "$LOG_FILE"
+    fi
+}
+
+# ------------------------------------------------------------
+# ログ表示
+# ------------------------------------------------------------
+
+show_logs() {
+    run_as_root journalctl \
+        -u "$SVXLINK_SERVICE" \
+        -n 100 \
+        --no-pager \
+        >"$LOG_FILE" 2>&1 || true
+
+    show_text_file \
+        "SVXLink Log" \
+        "$LOG_FILE"
+}
+
+# ------------------------------------------------------------
+# 終了確認
+# ------------------------------------------------------------
+
+exit_menu() {
+    if [ "$CHANGED" -eq 1 ]; then
+        dialog \
+            --clear \
+            --no-shadow \
+            --title "未保存の変更" \
+            --yesno \
+"保存されていない変更があります。
+
+変更を破棄して戻りますか？" \
+            11 62
+
+        if [ "$?" -ne 0 ]; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+# ------------------------------------------------------------
+# メインメニュー
+# ------------------------------------------------------------
+
+echolink_menu() {
+    local selection=""
+    local status_text=""
+
+    load_settings
+
+    while true; do
+        if [ "$CHANGED" -eq 1 ]; then
+            status_text="未保存"
+        else
+            status_text="保存済み"
+        fi
+
+        dialog \
+            --clear \
+            --no-shadow \
+            --ok-label "選択" \
+            --cancel-label "戻る" \
+            --backtitle \
+"SVXLinkJP EchoLink Settings
+Callsign: ${CALLSIGN:-未設定}   状態: ${status_text}" \
+            --title "EchoLink Settings" \
+            --menu \
+"設定項目を選択してください。" \
+            22 76 13 \
+            1  "Callsign          コールサイン設定" \
+            2  "Password          パスワード設定" \
+            3  "Sysop Name        運用者名・局名" \
+            4  "Location          設置場所" \
+            5  "Description       局の説明" \
+            6  "Server            EchoLinkサーバー" \
+            7  "MAX QSOs          最大同時接続数" \
+            8  "Show Current      現在設定表示" \
+            9  "Register Module   ModuleEchoLink登録" \
+            10 "Diagnosis         設定診断" \
+            11 "Save              設定保存" \
+            12 "Restart SVXLink   サービス再起動" \
+            13 "Log               ログ表示" \
+            0  "Back              メインメニューへ戻る" \
+            2>"$RESULT_FILE"
+
+        dialog_result=$?
+
+        if [ "$dialog_result" -ne 0 ]; then
+            if exit_menu; then
+                break
+            else
+                continue
+            fi
+        fi
+
+        selection="$(cat "$RESULT_FILE")"
+
+        case "$selection" in
+            1)
+                set_callsign
+                ;;
+
+            2)
+                set_password
+                ;;
+
+            3)
+                set_sysop_name
+                ;;
+
+            4)
+                set_location
+                ;;
+
+            5)
+                set_description
+                ;;
+
+            6)
+                set_servers
+                ;;
+
+            7)
+                set_max_qsos
+                ;;
+
+            8)
+                show_current_settings
+                ;;
+
+            9)
+                register_module
+                ;;
+
+            10)
+                diagnosis
+                ;;
+
+            11)
+                save_settings
+                ;;
+
+            12)
+                restart_svxlink
+                ;;
+
+            13)
+                show_logs
+                ;;
+
+            0)
+                if exit_menu; then
+                    break
+                fi
+                ;;
+
+            *)
+                show_error "正しい項目を選択してください。"
+                ;;
+        esac
+    done
+}
+
+# ------------------------------------------------------------
+# 起動
+# ------------------------------------------------------------
+
+if ! command -v dialog >/dev/null 2>&1; then
+    echo "dialogがインストールされていません。"
+    echo
+    echo "sudo apt install -y dialog"
+    exit 1
+fi
+
+echolink_menu
+
+exit 0

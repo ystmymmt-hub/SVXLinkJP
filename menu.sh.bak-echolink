@@ -1,0 +1,232 @@
+#!/bin/bash
+
+PROJECT_DIR="$HOME/SVXLinkJP"
+MODULE_DIR="$PROJECT_DIR/modules"
+VERSION_FILE="$PROJECT_DIR/version"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ -f "$SCRIPT_DIR/version" ]; then
+    VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/version")"
+else
+    VERSION="unknown"
+fi
+
+
+
+
+
+
+
+
+
+run_module()
+{
+    local module_file="$1"
+    local module_name="$2"
+
+    if [ ! -f "$module_file" ]; then
+        whiptail \
+            --title "Module Error" \
+            --msgbox \
+"$module_name が見つかりません。
+
+$module_file" \
+            13 70
+        return 1
+    fi
+
+    if [ ! -s "$module_file" ]; then
+        whiptail \
+            --title "Module Information" \
+            --msgbox \
+"$module_name は現在作成中です。
+
+ファイル:
+$module_file" \
+            13 70
+        return 1
+    fi
+
+    if [ ! -x "$module_file" ]; then
+        chmod +x "$module_file" 2>/dev/null
+    fi
+
+    "$module_file"
+}
+
+while true
+do
+    VERSION=$(cat "$VERSION_FILE" 2>/dev/null)
+    [ -z "$VERSION" ] && VERSION="不明"
+
+    SVX_STATE=$(systemctl is-active svxlink 2>/dev/null)
+
+    case "$SVX_STATE" in
+        active)
+            SVX_TEXT="動作中"
+            ;;
+        inactive)
+            SVX_TEXT="停止中"
+            ;;
+        failed)
+            SVX_TEXT="異常停止"
+            ;;
+        *)
+            SVX_TEXT="不明"
+            ;;
+    esac
+
+    ETH_IP=$(ip -4 -o address show dev eth0 2>/dev/null |
+        awk 'NR == 1 {print $4}')
+
+    WLAN_IP=$(ip -4 -o address show dev wlan0 2>/dev/null |
+        awk 'NR == 1 {print $4}')
+
+    [ -z "$ETH_IP" ] && ETH_IP="未接続"
+    [ -z "$WLAN_IP" ] && WLAN_IP="未接続"
+
+    CHOICE=$(whiptail \
+        --title "SVXLinkJP Ver.$VERSION" \
+        --menu \
+"SVXLink状態: $SVX_TEXT
+eth0: $ETH_IP
+wlan0: $WLAN_IP
+
+操作を選択してください。" \
+        28 82 13 \
+        1 "SVXLink Settings   基本設定" \
+        2 "EchoLink Settings  EchoLink設定" \
+        3 "Radio Settings     無線機・音声設定" \
+        4 "Network Settings   IP・Wi-Fi・バックアップ" \
+        5 "System Backup      システムバックアップ・復元" \
+        6 "Update             更新機能" \
+        7 "System             状態・ログ・再起動" \
+        8 "Restart SVXLink    SVXLinkサービス再起動" \
+        9 "Stop SVXLink       SVXLinkサービス停止" \
+        10 "Start SVXLink      SVXLinkサービス開始" \
+        0 "Exit               終了" \
+        3>&1 1>&2 2>&3)
+
+    RET=$?
+
+    [ "$RET" -ne 0 ] && clear && exit 0
+
+    case "$CHOICE" in
+        1)
+            run_module \
+                "$MODULE_DIR/settings.sh" \
+                "SVXLink Settings"
+            ;;
+
+        2)
+            run_module \
+                "$MODULE_DIR/echolink.sh" \
+                "EchoLink Settings"
+            ;;
+
+        3)
+            run_module \
+                "$MODULE_DIR/radio.sh" \
+                "Radio Settings"
+            ;;
+
+        4)
+            run_module \
+                "$MODULE_DIR/network.sh" \
+                "Network Settings"
+            ;;
+
+        5)
+            run_module \
+                "$MODULE_DIR/backup.sh" \
+                "System Backup"
+            ;;
+
+        6)
+            run_module \
+                "$MODULE_DIR/update.sh" \
+                "Update"
+            ;;
+
+        7)
+            run_module \
+                "$MODULE_DIR/system.sh" \
+                "System"
+            ;;
+
+        8)
+            whiptail \
+                --title "Restart SVXLink" \
+                --yesno \
+"SVXLinkサービスを再起動します。
+
+実行しますか？" \
+                12 60
+
+            if [ $? -eq 0 ]; then
+                if sudo systemctl restart svxlink; then
+                    sleep 2
+
+                    STATE=$(systemctl is-active svxlink 2>/dev/null)
+
+                    whiptail \
+                        --title "Restart SVXLink" \
+                        --msgbox \
+"SVXLinkを再起動しました。
+
+状態:
+$STATE" \
+                        12 58
+                else
+                    whiptail \
+                        --title "SVXLink Error" \
+                        --msgbox \
+"SVXLinkの再起動に失敗しました。" \
+                        11 60
+                fi
+            fi
+            ;;
+
+        9)
+            whiptail \
+                --title "Stop SVXLink" \
+                --yesno \
+"SVXLinkサービスを停止します。
+
+実行しますか？" \
+                12 58
+
+            if [ $? -eq 0 ]; then
+                sudo systemctl stop svxlink
+            fi
+            ;;
+
+        10)
+            if sudo systemctl start svxlink; then
+                sleep 2
+
+                STATE=$(systemctl is-active svxlink 2>/dev/null)
+
+                whiptail \
+                    --title "Start SVXLink" \
+                    --msgbox \
+"SVXLinkを開始しました。
+
+状態:
+$STATE" \
+                    12 58
+            else
+                whiptail \
+                    --title "SVXLink Error" \
+                    --msgbox \
+"SVXLinkの開始に失敗しました。" \
+                    11 58
+            fi
+            ;;
+
+        0)
+            clear
+            exit 0
+            ;;
+    esac
+done
