@@ -5,10 +5,8 @@ backup/
 
 # NetworkManager設定（Wi-Fiパスワードを含む可能性あり）
 *.nmconnection
-
 # 実機固有のローカル設定
 config/config.ini
-
 # 一時ファイル・旧版
 *.tmp
 *.log
@@ -18,3 +16,14 @@ config/config.ini
 *.bak.*
 __pycache__/
 *.pyc
+# Local SVXLinkJP configuration
+# Local personal configuration
+# Generated backup files
+*.backup
+*.backup.*
+
+# Timestamped backup files
+*.backup.*
+*.backup-[0-9]*
+*.backup.[0-9]*
+check_result.txt

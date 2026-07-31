@@ -1,5 +1,6 @@
 #!/bin/bash
-
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
 #############################################
 # SVXLink JP Edition
 # JP Smart Beacon Ver4.1
@@ -35,7 +36,11 @@ fi
 
 PLAYER=$PLAYER
 
-DIR=$AUDIO_DIR
+if [[ "$AUDIO_DIR" = /* ]]; then
+    DIR="$AUDIO_DIR"
+else
+    DIR="${PROJECT_ROOT}/${AUDIO_DIR}"
+fi
 
 play(){
 

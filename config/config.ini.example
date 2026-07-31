@@ -3,10 +3,9 @@
 # Main Configuration
 ########################################
 
-CALLSIGN=JQ1YOF-R]
-
-ECHOLINK_CALL=JQ1YOF-R
-ECHOLINK_PASSWORD=BOUSAI
+CALLSIGN=YOURCALL-L
+ECHOLINK_CALL=YOURCALL-L
+ECHOLINK_PASSWORD=YOUR_PASSWORD
 
 ########################################
 # Audio
